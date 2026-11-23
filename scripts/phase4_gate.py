@@ -85,11 +85,32 @@ HI_MODELS = {
 SEEDS = list(HI_MODELS)
 # The three seeds this gate checks, derived directly from HI_MODELS' keys
 # so the two stay in sync automatically.
+## WHY derive SEEDS from HI_MODELS instead of writing SEEDS = ["42", "43",
+## "44"] as its own separate literal: if these were two independent lists,
+## editing one (e.g. adding a 4th seed to HI_MODELS when a new Phase 3
+## checkpoint is pinned) without remembering to also update the other would
+## leave the gate silently checking the WRONG set of seeds — either
+## skipping the new seed entirely, or crashing with a KeyError looking up a
+## seed in HI_MODELS that SEEDS mentions but HI_MODELS doesn't have.
+## Deriving one from the other makes that class of edit-one-forget-the-other
+## bug structurally impossible.
 HI_REPRO_TOLERANCE = 0.001  # about two entities on the 1,929-entity Hindi gold set
 # Allowed numerical drift when re-measuring the hi->hi F1 in Phase 4 versus
 # the value originally recorded in Phase 3 — small floating-point/hardware
 # nondeterminism is tolerated, but anything larger suggests a real
 # discrepancy (e.g. a different checkpoint was accidentally loaded).
+## WHY any nonzero tolerance at all, instead of requiring the two F1 numbers
+## to match EXACTLY: reloading the same checkpoint weights on (possibly)
+## different GPU hardware or a different library version doesn't guarantee
+## bit-identical floating-point results — non-deterministic GPU kernels,
+## different batch ordering, or minor numeric-precision differences can
+## shift the score by a tiny amount even when the actual predictions are
+## unchanged on all but a couple of entities. WHY exactly 0.001 and not
+## looser: the comment ties it to a concrete, checkable scale ("about two
+## entities" out of 1,929) — loose enough to absorb that harmless noise,
+## tight enough that loading a genuinely WRONG checkpoint (which would
+## typically shift dozens or hundreds of entity predictions, not one or
+## two) still fails this check.
 SUBSET_SIZE = "300000"
 # The fixed training subset size (300,000 examples) every Phase 4 run must use.
 EPOCHS = "3"
@@ -168,6 +189,16 @@ def main() -> None:
     # The total row count must be exactly (number of required transfer-matrix
     # cells) times (number of seeds) — e.g. 5 required pairs x 3 seeds = 15
     # rows — catching both missing and duplicate rows at a glance.
+    ## WHY check the TOTAL count here, when section 2 below already checks
+    ## `len(found) == 1` for every individual required cell: those per-cell
+    ## checks can only ever catch a missing or duplicated row WITHIN the
+    ## required set — they say nothing about whether some EXTRA, unexpected
+    ## row also got tagged "phase=4" (e.g. a stray debug run that wasn't
+    ## caught by the "DEBUG" substring convention, or a typo'd extra pair).
+    ## If every required cell has exactly one row AND the total still came
+    ## out higher than expected, this check is what flags that something
+    ## extra and unaccounted-for is mixed into the Phase 4 results, which
+    ## the per-cell loop alone would silently let through.
 
     print("\n2. Transfer matrix + in-language runs, per seed")
     # Section header: validates every individual (seed, train, test)
@@ -201,6 +232,20 @@ def main() -> None:
             # Confirm this run used the fixed training-set size and epoch count.
             check(bool(CHECKPOINT_URL.fullmatch(r["checkpoint_path"])), f"{name} checkpoint_path is a pinned Hugging Face link")
             # Confirm the checkpoint link is pinned to an exact commit SHA.
+            ## WHY this branches into two entirely different kinds of check
+            ## (exact-checkpoint-identity below vs. recipe-only further down)
+            ## instead of one uniform check for every cell: hi->hi/mr/bn
+            ## cells and mr->mr/bn->bn cells represent fundamentally
+            ## different operations. The hi->* cells are ZERO-SHOT eval —
+            ## no training happens in Phase 4 at all, they just reload an
+            ## already-existing Phase 3 checkpoint and run inference on a
+            ## new test language — so the only meaningful check is "is this
+            ## the SAME exact weights as Phase 3." The in-language cells
+            ## involve genuinely NEW training runs with no prior checkpoint
+            ## to compare identity against, so the meaningful check instead
+            ## becomes "was the training recipe/hyperparameters the same
+            ## fixed setup used everywhere else" — a different question
+            ## because it's a different kind of cell.
             if train == SOURCE:
                 # For any cell trained on Hindi (the hi->hi, hi->mr, and
                 # hi->bn cells), the checkpoint must be the EXACT Phase 3
@@ -249,6 +294,16 @@ def main() -> None:
     # missing/None (which would mean some row's notes lacked a "git=" field
     # entirely) — ensures every Phase 4 result was produced by one
     # consistent version of the code.
+    ## WHY the explicit `None not in commits` half of this check matters
+    ## (not just `len(commits) == 1` on its own): parse_notes(...).get("git")
+    ## returns None whenever a row's notes string has no "git=" field at
+    ## all. If EVERY Phase 4 row happened to be missing that field (e.g. a
+    ## future refactor of the logging code dropped it by accident),
+    ## `commits` would be the single-element set `{None}` — and
+    ## `len(commits) == 1` would be TRUE, passing this check despite the
+    ## fact that no commit was actually recorded for any row at all. The
+    ## explicit None check closes that loophole: "everyone agrees" and
+    ## "everyone agrees on NOTHING" must not look the same to this gate.
 
     print("\n3. One clean Phase 4 notebook execution")
     # Section header: verifies the Phase 4 notebook ran top-to-bottom once
@@ -293,6 +348,15 @@ def main() -> None:
     # Section header for a purely informational summary (not a pass/fail
     # check) showing how much better in-language training does versus
     # zero-shot transfer from Hindi, for each target language.
+    ## WHY this section only prints, with no check()/pass-fail gate on the
+    ## gap's sign or size (e.g. no "assert gap > 0"): this gate's job is to
+    ## verify the DATA is complete, traceable, and trustworthy — not to
+    ## enforce a particular research conclusion. A negative or small gap
+    ## (zero-shot transfer matching or beating in-language training) would
+    ## be a genuinely interesting, publishable finding, not a bug to reject.
+    ## Turning this into a hard pass/fail check would conflate "the
+    ## experiment was run correctly" with "the experiment confirmed what we
+    ## expected," and would make the gate fail on a legitimate result.
     for t in TARGETS:
         # Compute and print the transfer gap for each target language (mr, bn).
         gaps = [float(cells[(s, t, t)]["F1_overall"]) - float(cells[(s, SOURCE, t)]["F1_overall"]) for s in SEEDS]

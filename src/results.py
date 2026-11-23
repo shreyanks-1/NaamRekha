@@ -17,6 +17,17 @@ import os
 COLUMNS = [
     # The fixed, ordered set of column names every results row must have —
     # defining this once ensures every run is logged with a consistent schema.
+    ## WHY a fixed, explicit list instead of letting csv.DictWriter infer
+    ## fieldnames from each row's dict keys: log_result is called from many
+    ## separate scripts/notebooks (phase1 through phase6) over the life of
+    ## the project, possibly weeks apart. If fieldnames were inferred per
+    ## call, a row dict built in a slightly different key order, or one that
+    ## happened to omit an optional field, would shift which column is
+    ## which — and because results.csv is appended to, NOT rewritten, two
+    ## different column orders could end up in the same file with only one
+    ## header row at the top, making every row after the first drift
+    ## written under the wrong column. The fixed COLUMNS list guarantees
+    ## every row, from every phase/run, lines up under the same header.
     "model",
     # Which model architecture/checkpoint produced this run (e.g. "bilstm-crf", "muril").
     "train_lang",
@@ -57,6 +68,17 @@ def log_result(
     # The bare `*` forces every parameter after it to be passed by keyword
     # only (not positionally), preventing accidental argument-order mistakes
     # when calling this function from notebooks.
+    ## WHY this matters concretely here: train_lang, test_lang are both plain
+    ## `str` with no type distinction between them, and model/notes are also
+    ## both `str`. Without keyword-only enforcement, a call like
+    ## log_result("muril", "hi", "mr", 1000, 5, scores) would TYPE-CHECK fine
+    ## even if someone swapped train_lang and test_lang by accident — Python
+    ## can't catch a same-type argument-order mistake. The row would be
+    ## logged with train/test languages reversed with no error, silently
+    ## corrupting the scaling-curve/transfer-matrix analysis built on top of
+    ## results.csv. Keyword-only args force every call site to write
+    ## `train_lang=..., test_lang=...` explicitly, making the mistake visible
+    ## at the call site instead of only in the downstream data.
     model: str,
     # Name/identifier of the model architecture used in this run.
     train_lang: str,
@@ -97,6 +119,16 @@ def log_result(
         "F1_PER": scores.get("F1_PER", ""),
         # Pull the PERSON F1 score out of the scores dict; falls back to an
         # empty string if that key is somehow missing, rather than raising.
+        ## WHY .get(..., "") instead of scores["F1_PER"] here (and for the
+        ## three F1 keys below): eval.evaluate() always returns all four
+        ## keys today, but log_result's `scores` parameter is typed as the
+        ## general `dict[str, float]`, not tied by the type system to
+        ## evaluate()'s exact return shape — a caller could pass a
+        ## hand-built partial dict (e.g. while gating only on F1_overall).
+        ## Direct indexing would raise KeyError and lose the ENTIRE row
+        ## (model, langs, epochs, checkpoint_path too) over one missing
+        ## metric. Falling back to "" logs an incomplete-but-present row
+        ## instead, which is recoverable; a missing row is not.
         "F1_ORG": scores.get("F1_ORG", ""),
         # Pull the ORGANIZATION F1 score, same empty-string-if-missing fallback.
         "F1_LOC": scores.get("F1_LOC", ""),
@@ -116,6 +148,18 @@ def log_result(
     # Decide whether a CSV header row needs to be written: true if the file
     # doesn't exist yet, OR it exists but is completely empty (0 bytes) —
     # both cases mean there's no header present yet.
+    ## WHY check file SIZE and not just existence: os.makedirs just above
+    ## guarantees the directory exists, but a file can exist on disk with 0
+    ## bytes — e.g. from `touch`, from a previous run that crashed between
+    ## creating the file and writing to it, or from the `.gitkeep`-style
+    ## placeholder pattern used elsewhere in this repo. `not os.path.exists`
+    ## alone would miss that case: it would see the file "exists" and skip
+    ## writeheader(), so the very first real row would be appended into a
+    ## headerless file — every downstream pandas.read_csv(path) call would
+    ## then silently treat that first data row AS the header.
+    ## WHY check it before opening in "a" mode rather than after: appending
+    ## is a single pass — if the size were checked after a partial write
+    ## began, the file would no longer be reliably empty/non-empty.
     with open(path, "a", newline="", encoding="utf-8") as f:
         # Open in append mode ("a") so existing rows are preserved and this
         # run is added after them; newline="" is required by the csv module

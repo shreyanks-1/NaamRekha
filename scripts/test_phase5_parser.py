@@ -387,6 +387,15 @@ def test_nested_longest_first_and_shorter_gets_free_occurrences():
     # SHORTER span first in the model's output to prove that listing order
     # doesn't override span-length priority — length always wins regardless
     # of the order spans were listed in.
+    ## WHY deliberately list the SHORTER span first (adversarially), instead
+    ## of writing the test with the longer span listed first as it might be
+    ## in a "natural" example: if the test data happened to list longer-first,
+    ## this test would pass whether the implementation actually prioritizes
+    ## BY LENGTH or simply processes spans in LISTING ORDER — the two
+    ## mechanisms would be indistinguishable from the test's perspective.
+    ## Listing the short span first specifically rules out "it just
+    ## processes in listing order" as an alternative (and wrong) explanation
+    ## for a passing test.
     words = ["नई", "दिल्ली", "और", "दिल्ली", "में", "मेला"]
     # "New Delhi and Delhi [had] a fair" — "दिल्ली" (Delhi) alone appears at
     # index 1 (as part of "नई दिल्ली"/New Delhi) and again standalone at index 3.
@@ -457,6 +466,18 @@ def test_length_always_matches_even_for_garbage():
             # single-word sentence, and even an EMPTY word list — checking
             # the length invariant holds regardless of sentence length too,
             # including the edge case of zero words.
+            ## WHY cross EVERY garbage string against all three word-list
+            ## lengths (a nested loop), rather than testing each garbage
+            ## string once against just the standard 9-word W: the
+            ## length-matching invariant is implemented via code like
+            ## `["O"] * len(words)`, `starts`/`ends` offset bookkeeping, and
+            ## the `occurrences`/sorting logic — any off-by-one or
+            ## boundary bug in that bookkeeping is far more likely to
+            ## surface specifically at the length extremes (a single-token
+            ## sentence, or zero tokens at all) than at a "normal" 9-word
+            ## length. Testing only one sentence length per garbage input
+            ## could easily miss a bug that only manifests at len(words) in
+            ## {0, 1}.
             assert len(parse_llm_output(g, words).tags) == len(words), g
             # No matter how broken `g` is, the returned tags list's length
             # must exactly equal the input word list's length; `g` is
@@ -477,6 +498,18 @@ def test_tags_are_valid_iob2_for_any_output():
     # Three deliberately messy/overlapping sets of listed spans against the
     # shared sentence W, designed to stress-test the overlap-resolution
     # logic (R7) with various overlapping and nested spans of different lengths.
+    ## WHY deliberately construct OVERLAPPING, messy span lists here instead
+    ## of only testing clean, non-overlapping entity lists (as most other
+    ## tests in this file do): a span that gets PARTIALLY blocked — i.e. it
+    ## has multiple token-occurrences but only some get placed because
+    ## others collide with a higher-priority span, or a span sharing exactly
+    ## one token boundary with another — is precisely where an IOB2
+    ## violation (a stray "I-X" with no matching "B-X" immediately before
+    ## it, left over from an aborted partial placement) is most likely to
+    ## slip through. Clean, non-overlapping inputs would never exercise the
+    ## overlap-resolution code paths (R7) at all, so this invariant could
+    ## hold trivially on simple cases while still being broken exactly where
+    ## it matters most.
     for o in outs:
         # Check each of the three stress-test outputs.
         tags = parse_llm_output(o, W).tags
@@ -530,6 +563,17 @@ def test_gold_round_trip():
     # are IDENTICAL to the original `gold` tags — the complete round trip.
 
 
+## WHY this test exists at all: parse_llm_output itself can NEVER produce an
+## orphan "I-" tag (every span placement explicitly writes a "B-" at its
+## first token, by construction — see R9 in phase5_parser.py), so this
+## scenario could never arise from that function's own output. But
+## tags_to_entities is ALSO called standalone on REAL GOLD data from the
+## Naamapadam dataset (to build few-shot prompt examples), and that real
+## data does contain orphan I- tags in practice — src/data.py's own loader
+## trusts the dataset without re-validating alignment, and Phase 1's IOB2
+## validation found thousands of orphan I- tags in the actual training
+## data. tags_to_entities has to handle that real-world case gracefully,
+## not just the clean shape its sibling function happens to produce.
 def test_orphan_i_tag_starts_an_entity():
     # Covers tags_to_entities' documented "orphan I- starts a new entity"
     # behavior (matching how the seqeval scoring library itself treats
@@ -570,6 +614,19 @@ def _run_all() -> int:
             # test doesn't crash the whole run and prevent later tests from
             # executing; `# noqa: BLE001` suppresses the "blind except"
             # lint warning, since catching broadly is intentional here.
+            ## WHY this runner is lenient (catches and continues) while
+            ## scripts/phase5_gate.py calls these SAME test functions with a
+            ## bare `t()` and lets any failure crash immediately: the two
+            ## callers have different goals. Run directly by a developer
+            ## (here), the point is maximum diagnostic information — seeing
+            ## EVERY test's pass/fail status in one run, since several tests
+            ## failing at once from one root-cause change is common and
+            ## useful to see all at once. The gate script instead wants to
+            ## fail LOUD and FAST the instant anything is wrong, consistent
+            ## with every other check() in that file — it's verifying the
+            ## parser is trustworthy before building 800+ sentences' worth of
+            ## further checks on top of it, where "keep going after a
+            ## failure" would just produce confusing, cascading noise.
             failed += 1
             # Count this test as failed.
             print("  FAIL ", name, "->", repr(e))

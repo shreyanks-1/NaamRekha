@@ -97,6 +97,20 @@ def load_scores() -> list[dict]:
             # Either no row matched, or ambiguously multiple rows matched.
             raise SystemExit(f"expected exactly one results.csv row for {what}, found {len(found)}")
             # Fail immediately and clearly, naming which system's lookup failed.
+            ## WHY reject BOTH zero AND more-than-one matches here, rather
+            ## than e.g. silently taking found[0] or found[-1] when there
+            ## are multiple: the module docstring's whole premise is that
+            ## these figures are drawn ONLY from logged results, "nothing
+            ## typed in by hand" — if a predicate like the MuRIL lookup ever
+            ## matched two rows (which it genuinely can, since the same
+            ## MuRIL checkpoint gets logged again under Phase 4's "phase=4"
+            ## tag), picking an arbitrary one would silently make an
+            ## editorial choice about which run is "the" result, with no
+            ## visible signal that a choice was even made. Failing loudly
+            ## instead forces whoever's predicate is ambiguous to tighten it
+            ## (as the MuRIL predicate below does, excluding "phase" notes)
+            ## rather than letting the figure quietly plot whichever row
+            ## Python's list filtering happened to find first.
         return found[0]
         # Exactly one match: return it.
 
@@ -109,6 +123,18 @@ def load_scores() -> list[dict]:
         # The ordered list of (display name, selected row) pairs for all
         # five systems compared in the Phase 6 report, in the exact order
         # they'll be plotted.
+        ## WHY the predicate specifically excludes `"phase" not in
+        ## notes_of(r)` on top of model/lang/subset_size/seed: this exact
+        ## MuRIL checkpoint (300k, Hindi, seed 42) is logged in results.csv
+        ## TWICE — once under its original Phase 3 entry, and again under
+        ## Phase 4's hi->hi row (re-evaluating the same checkpoint, tagged
+        ## with a "phase=4" note, per phase4_gate.py's REQUIRED pairs).
+        ## Without this exclusion, the predicate above it would match BOTH
+        ## rows and `pick()` would raise its "found 2, expected 1" error —
+        ## this clause is specifically what disambiguates "the original
+        ## Phase 3 logging of this run" from "Phase 4's re-use of the same
+        ## checkpoint for a different purpose," which otherwise look
+        ## identical on every other field being matched.
         ("MuRIL (seed 42)", pick(lambda r: r["model"] == "MuRIL" and hi(r) and r["subset_size"] == "300000"
                                  and notes_of(r).get("seed") == "42" and "phase" not in notes_of(r), "MuRIL 300k seed 42 (Phase 3)")),
         # Pin down the SPECIFIC MuRIL row: model name "MuRIL", trained AND
@@ -213,6 +239,15 @@ def draw_comparison(scores: list[dict]) -> None:
     # phase6_figures.py elsewhere (e.g. for --check mode, or for reuse of
     # its data-loading functions) doesn't require matplotlib to be
     # installed at all.
+    ## WHAT BREAKS with a TOP-LEVEL `import matplotlib` instead: the
+    ## module docstring explicitly sells `--check` as a fast, data-only
+    ## verification mode (`main()` returns before calling draw_comparison/
+    ## draw_errors at all when --check is passed). If matplotlib were
+    ## imported at module scope, simply running `python scripts/
+    ## phase6_figures.py --check` would already require matplotlib
+    ## installed just to get past the import statement — defeating the
+    ## entire point of offering a lightweight check that doesn't need the
+    ## (large, slower-to-install) plotting dependency.
     matplotlib.use("Agg")
     # Select the "Agg" backend explicitly — a non-interactive, headless
     # rendering backend that writes directly to image files without needing
@@ -221,6 +256,16 @@ def draw_comparison(scores: list[dict]) -> None:
     import matplotlib.pyplot as plt
     # Import pyplot AFTER setting the backend, since matplotlib backends
     # must be selected before pyplot is imported for the setting to take effect.
+    ## WHY this specific order (use() THEN import pyplot) is load-bearing,
+    ## not just a style preference: matplotlib locks in and initializes its
+    ## rendering backend the first time `matplotlib.pyplot` is imported —
+    ## that import is what actually wires up the GUI toolkit or headless
+    ## renderer. Calling matplotlib.use("Agg") AFTER pyplot was already
+    ## imported either has no effect (the backend is already locked to
+    ## whatever pyplot auto-detected, which on a headless CI machine with
+    ## no display could raise an error trying to initialize a GUI backend)
+    ## or emits a warning, depending on matplotlib version — the ordering
+    ## here isn't cosmetic, it's what makes Agg actually take effect.
 
     fig, ax = plt.subplots(figsize=(8.2, 4.4), dpi=200, facecolor=SURFACE)
     # Create a new figure and single Axes: a fixed 8.2x4.4 inch size, high
@@ -294,6 +339,18 @@ def draw_comparison(scores: list[dict]) -> None:
         # throughout the project's analysis, and the module docstring notes
         # this direct labeling compensates for ORG's orange color being
         # below the ideal contrast ratio against the light SURFACE background.
+        ## WHY add a text label rather than simply picking a different,
+        ## higher-contrast color for ORG specifically: TYPE_COLORS assigns
+        ## ONE consistent color per entity type (blue=PER, orange=ORG,
+        ## green=LOC), and that mapping is presumably reused across every
+        ## figure in the report (the module docstring frames the palette
+        ## choice project-wide, not per-figure). Changing ORG's color just
+        ## for this chart would break that cross-figure color consistency —
+        ## a reader flipping between figures would no longer be able to
+        ## rely on "orange always means ORG." Adding a redundant text label
+        ## instead fixes the accessibility problem (the number is readable
+        ## regardless of color contrast) without sacrificing that
+        ## consistency.
     leg = ax.legend(ncols=3, frameon=False, loc="lower left", bbox_to_anchor=(0, 1.0), fontsize=9)
     # Add a legend with 3 columns (one per entity type, laid out
     # horizontally), no frame/border box (frameon=False, for the same

@@ -135,6 +135,17 @@ class ParseResult:
     # The raw (not squashed) text of every span counted in n_unaligned, kept
     # for manual error inspection; default_factory=list gives each
     # ParseResult instance its own independent empty list.
+    ## WHAT BREAKS with `unaligned_texts: list[str] = []` instead of
+    ## `field(default_factory=list)`: a bare mutable default in a dataclass
+    ## (same underlying issue as Python's classic "mutable default argument"
+    ## pitfall) is evaluated ONCE when the class is defined, and every
+    ## instance that doesn't explicitly pass unaligned_texts would then share
+    ## that SAME list object. Appending to one ParseResult's
+    ## unaligned_texts (e.g. res.unaligned_texts.append(raw) later in this
+    ## file) would silently also grow every OTHER ParseResult's
+    ## unaligned_texts — corrupting per-sentence diagnostics across the
+    ## entire dataset with no error raised. field(default_factory=list)
+    ## instead calls list() fresh for each new instance.
     spans: list[tuple[int, int, str]] = field(default_factory=list)  # (first, last, type) word indices
     # The final list of successfully placed entity spans, each as (first
     # word index, last word index, entity type) — a more structured view of
@@ -153,6 +164,19 @@ def squash(s: str) -> str:
     # then strip out every invisible/whitespace character matched by
     # _INVISIBLE, so e.g. "एम ." (with a token-splitting space) and "एम."
     # (written together by a model) squash to the exact same comparison string.
+    ## WHY normalize BEFORE stripping, and not the other way around (strip
+    ## first, then normalize): Devanagari/Bengali conjunct formation can
+    ## depend on an INVISIBLE joiner character (e.g. ZWJ/ZWNJ) sitting
+    ## between two base characters to decide how they combine — NFC
+    ## normalization reads the surrounding characters, joiners included, to
+    ## decide whether to compose them into a single precomposed codepoint.
+    ## If invisible characters were stripped FIRST, a joiner that NFC needed
+    ## to see in order to correctly (de)compose a nukta/conjunct sequence
+    ## would already be gone, and normalizing what's left could compose
+    ## differently than normalizing the original text would have —
+    ## producing a squashed form that doesn't actually match an
+    ## identically-written span elsewhere, breaking R5 alignment on
+    ## legitimate matches for exactly the scripts this project targets.
 
 
 def tags_to_entities(words: list[str], tags: list[str]) -> list[dict[str, str]]:
@@ -231,6 +255,17 @@ def _load_json(text: str) -> tuple[object, bool]:
         pass
         # If the whole text isn't valid JSON by itself, fall through to try
         # more lenient extraction strategies below rather than failing immediately.
+        ## WHY try strategies in this exact order (whole-text, then fenced
+        ## blocks, then bracket-scanning the defenced body) rather than
+        ## jumping straight to the most lenient bracket-scan every time:
+        ## each stage is strictly more willing to GUESS where the real JSON
+        ## is, and more guessing means more chances of extracting the WRONG
+        ## span and silently misjudging the model's actual answer. Trying
+        ## the strictest interpretation first (the whole response IS the
+        ## JSON, no guessing needed) means noisy is only ever set True when
+        ## leniency was actually required, which keeps the noisy/malformed
+        ## diagnostics meaningful rather than every single response getting
+        ## flagged noisy by routing everything through the loosest path.
     for m in _FENCE.finditer(t):
         # Look for every markdown code-fence block in the text (there could
         # be stray formatting around a fenced JSON answer).
@@ -269,6 +304,24 @@ def _load_json(text: str) -> tuple[object, bool]:
         # after the JSON value doesn't cause a parse failure, and the second
         # return value (end index) is intentionally discarded since we don't
         # need to know how much trailing text followed.
+        ## WHY raw_decode here instead of json.loads(body[min(starts):]):
+        ## json.loads requires the ENTIRE string it's given to be consumed as
+        ## one JSON value — any trailing characters after the value (e.g. a
+        ## model adding "\nThat's my answer." after the array) would make
+        ## json.loads raise JSONDecodeError on a perfectly valid, complete
+        ## entity list. raw_decode instead parses one JSON value starting at
+        ## position 0 and simply stops, returning how far it got — exactly
+        ## what's needed since this function only cares about the JSON
+        ## value itself, not whatever prose commentary might follow it.
+        ## WHY min(starts) (the EARLIER of "[" or "{") and not trying both
+        ## brackets and keeping whichever one succeeds: trying both and
+        ## accepting "whichever parses" could, on genuinely truncated
+        ## output, skip past a broken array at the first bracket and
+        ## "succeed" on some unrelated later "{" that happens to parse —
+        ## silently treating malformed, truncated output as if it were a
+        ## valid answer instead of correctly flagging it broken_json. This
+        ## is precisely the "truncated output is never half-rescued"
+        ## guarantee the module docstring promises under R1.
     except json.JSONDecodeError:
         raise ValueError("broken_json") from None
         # If even this lenient attempt fails, the JSON that starts there is
@@ -302,6 +355,14 @@ def _items(value: object) -> list[object]:
                 # value is itself a list.
                 return v
                 # Use that nested list as the items.
+        ## WHY check for a wrapping "entities" KEY before falling through to
+        ## the "single bare entity object" check below, rather than the
+        ## other order: a dict could in principle have both an "entities"
+        ## key AND top-level "text"/"type" keys as noise; checking the
+        ## structurally-more-specific "this dict wraps a list of items"
+        ## shape first means that's preferred whenever it's present, and the
+        ## single-bare-object fallback is only reached for dicts that don't
+        ## already look like the wrapped-list shape.
         if "text" in value and "type" in value:        # a single bare entity object
             # The model might have returned just ONE entity as a bare object
             # (forgetting to wrap it in a list) when the sentence has
@@ -392,6 +453,17 @@ def parse_llm_output(text: str, words: list[str]) -> ParseResult:
     for key, typ, raw in wanted:
         # Walk the valid items in their original listed order (important,
         # since "first listed wins" depends on order).
+        ## WHY "first-listed wins" rather than "last-listed wins" for R7's
+        ## same-text-different-type conflict: there's no way to tell from
+        ## the data alone which listing is "more correct," so the rule picks
+        ## whichever the model stated FIRST as a deterministic, arbitrary-
+        ## but-reproducible tiebreak. Implementing "first wins" is also what
+        ## makes the `if key in seen: ... continue` structure below simple —
+        ## once a key is in `seen`, every later duplicate is purely
+        ## tallied-or-skipped, never allowed to overwrite `seen[key]`; "last
+        ## wins" would instead require overwriting on every duplicate,
+        ## which is an equally simple change but a different, equally
+        ## arbitrary choice this project didn't make.
         if key in seen:
             # This exact span text has already been seen earlier in the list.
             if seen[key][0] != typ:
@@ -482,6 +554,17 @@ def parse_llm_output(text: str, words: list[str]) -> ParseResult:
         # If it never occurs, its length is defined as 0 (meaningless for
         # sorting purposes, but it will be dropped by the n_unaligned branch below anyway).
 
+    ## WHY longest-first specifically, rather than shortest-first or just
+    ## processing in original listing order: this is what makes the R7
+    ## "a token that already has a tag is never re-tagged" rule favor the
+    ## MORE SPECIFIC span when one span's text is a substring of another
+    ## (e.g. the model lists both "मोदी" and "नरेंद्र मोदी" for the same
+    ## mention). WHAT BREAKS with shortest-first instead: the short span
+    ## ("मोदी") would be placed first and claim its tokens, permanently
+    ## blocking the longer, more complete span ("नरेंद्र मोदी") from ever
+    ## being placed over the same (now already-tagged) tokens — silently
+    ## downgrading a correct full-name entity into a fragment, the opposite
+    ## of what R7 intends.
     ordered = sorted(enumerate(seen.items()), key=lambda p: (-n_tokens(p[1][0]), p[0]))
     # Build the processing order required by R7 ("longest first... ties by
     # listing order"): `enumerate(seen.items())` pairs each (key, (type,
@@ -494,6 +577,15 @@ def parse_llm_output(text: str, words: list[str]) -> ParseResult:
         # Process each unique entity span in longest-first, tie-broken-by-order sequence.
         occ = occurrences(key)
         # Re-find all whole-token-aligned occurrences of this span in the sentence.
+        ## WHY call occurrences(key) again here, when n_tokens(key) (used
+        ## just above to build `ordered`) already called occurrences(key)
+        ## internally once per key during sorting: caching each key's
+        ## occurrence list would save a second substring scan per key, but
+        ## `occurrences` is a cheap O(sentence length) scan over typically
+        ## short sentences, while threading a cache through would add
+        ## bookkeeping code for a negligible runtime saving at this data
+        ## scale — a deliberate simplicity-over-micro-optimization trade-off,
+        ## not an oversight.
         if not occ:
             # This span's text doesn't align with any run of whole tokens
             # anywhere in the sentence at all (R8: e.g. the model

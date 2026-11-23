@@ -68,6 +68,16 @@ TRACE_COLS = ["model", "train_lang", "test_lang", "subset_size", "epochs", *SCOR
 # deliberately excludes checkpoint_path/notes since those can legitimately
 # be edited after the fact (e.g. adding a Drive link later) without
 # invalidating traceability of the actual scores.
+## WHAT BREAKS if checkpoint_path/notes WERE included in TRACE_COLS: the
+## entirely legitimate, expected workflow of "train, log the row with
+## checkpoint_path='', then later add the real Drive share link once
+## uploaded" would make results.csv's checkpoint_path differ from whatever
+## the notebook printed at training time (when the link didn't exist yet) —
+## the match in section 3 below would then fail every single time for every
+## run, even though the actual experiment (model/langs/sizes/scores) is
+## provably identical. Limiting TRACE_COLS to only the experiment-defining
+## and scoring columns is what makes "editable metadata" and "immutable
+## experiment identity" two separate concerns.
 
 
 def check(cond: bool, msg: str) -> None:
@@ -82,6 +92,17 @@ def check(cond: bool, msg: str) -> None:
         # since later checks typically assume earlier ones passed.
 
 
+## WHY verify by re-parsing the notebook's PRINTED STDOUT OUTPUT rather than,
+## say, trusting results.csv on its own, or having the notebook write a
+## separate "I really ran" marker file: results.csv is a plain CSV anyone
+## could hand-edit to claim any score without ever training anything. A
+## notebook's saved cell OUTPUT, on the other hand, is only produced by
+## actually executing that cell (log_result's own print statement runs as a
+## side effect of logging) — so finding a matching printed line is evidence
+## the row traces back to a real execution, not just a claim in a file nobody
+## can independently verify. WHAT BREAKS this check: re-running the notebook
+## with "clear outputs" and committing it without re-executing would wipe
+## this printed evidence and make this check correctly fail.
 def notebook_logged_rows() -> list[dict[str, str]]:
     """Rows the notebook printed after log_result (lines starting with MODEL,)."""
     # Docstring: this function reverse-engineers which results rows were
@@ -146,11 +167,29 @@ def main() -> None:
     real = [r for r in runs if "DEBUG" not in r["notes"]]
     # Exclude any rows whose notes field is marked "DEBUG" — these represent
     # throwaway/test runs rather than the real reportable result.
+    ## WHY a "DEBUG" substring convention in the free-text `notes` column
+    ## instead of a dedicated boolean column (e.g. "is_debug"): COLUMNS is a
+    ## fixed, shared schema (src/results.py) used by every phase's logging —
+    ## adding a column for one phase's housekeeping need would mean
+    ## reworking that shared contract and every existing row in results.csv.
+    ## Piggybacking on the already-free-text `notes` field costs nothing
+    ## schema-wise. The trade-off: it's a string-matching convention, not an
+    ## enforced type, so a typo like "Debug" (wrong case) would silently
+    ## fail to exclude a throwaway run.
     check(len(real) >= 1, "at least one non-DEBUG run")
     # Require at least one genuine (non-debug) run to remain after filtering.
     row = max(real, key=lambda r: float(r["F1_overall"]))
     # If multiple genuine runs exist (e.g. from re-running with tweaks),
     # pick the single best one by overall F1 score to treat as "the" result.
+    ## WHY max-by-F1_overall rather than, say, the LAST matching row (most
+    ## recently appended, since results.csv is append-only): results.csv
+    ## accumulates every re-run over time, including earlier attempts with
+    ## bugs or worse hyperparameters that were later improved on — "most
+    ## recent" is not the same as "best," and could even be a step backward
+    ## (e.g. a quick re-run to test something unrelated). Picking the max F1
+    ## means this gate (and the doc-matching check in section 4) always
+    ## reports and verifies the project's actual best BiLSTM-CRF result,
+    ## regardless of what order experiments happened to be logged in.
 
     print("\n2. Row follows docs/03-conventions.md")
     # Section header: validates the chosen row's values against the
@@ -165,6 +204,15 @@ def main() -> None:
         # of exactly 0 would suggest a broken/dummy run, like the all-O
         # baseline from Phase 1) and at most 1.0 (the mathematical maximum
         # for an F1 score) — flags implausible or corrupted values.
+        ## WHY strictly `> 0.0` (not `>= 0.0`) specifically: phase1_gate.py's
+        ## own sanity check deliberately logs (in a temp file, not the real
+        ## results.csv) an all-O dummy baseline that scores exactly 0.0 on
+        ## every metric. If this gate only required `>= 0.0`, an accidental
+        ## or copy-pasted row from that kind of dummy/placeholder run ending
+        ## up in the REAL results.csv would pass as a "valid" BiLSTM-CRF
+        ## result. Requiring a strictly positive score encodes "this must be
+        ## a model that found at least one entity," ruling out the dummy
+        ## baseline shape specifically, not just malformed numbers.
     check(int(row["subset_size"]) > 0, f"subset_size = {int(row['subset_size']):,}")
     # The training subset size must be a positive integer — a real training
     # run must have used some non-zero amount of data.

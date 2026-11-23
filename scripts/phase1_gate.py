@@ -34,6 +34,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # goes up one more level to the repo root. Inserting that at the front of
 # sys.path (position 0) makes `import src` resolve correctly regardless of
 # the current working directory this script is launched from.
+## WHY this manual sys.path hack instead of `pip install -e .` / relying on
+## the package being installed: this repo is not installed as a package (no
+## setup is assumed beyond `uv sync` for dependencies) and gate scripts are
+## meant to be runnable directly, standalone, from any working directory.
+## WHAT BREAKS without it: Python only auto-adds the SCRIPT's own directory
+## (scripts/) to sys.path, not its parent — so `from src import ...` would
+## raise ModuleNotFoundError unless the caller happened to already be
+## running from the repo root with it on PYTHONPATH. Inserting at index 0
+## (not appending) also ensures this repo's `src/` wins over any
+## same-named package that might already be installed/importable elsewhere.
 
 from src import (  # noqa: E402
     # The `# noqa: E402` comment suppresses a linter warning about imports
@@ -65,10 +75,27 @@ EXPECTED_LABELS = ["O", "B-PER", "I-PER", "B-ORG", "I-ORG", "B-LOC", "I-LOC"]
 # A hardcoded copy of the expected label order, independent of src/data.py's
 # own LABELS constant, so this gate can detect if someone accidentally
 # changes the label contract in data.py without updating this check.
+## WHY literally duplicate the list here rather than just trusting
+## `src.data.LABELS` (e.g. skipping this check, or comparing LABELS to
+## itself): `check(LABELS == EXPECTED_LABELS, ...)` below would be a
+## tautology — always true — if EXPECTED_LABELS were imported FROM data.py
+## instead of hand-copied. The whole point of this gate is to catch someone
+## editing data.py's LABELS (reordering, adding, renaming a tag) and
+## forgetting that every trained checkpoint's output layer assumes the OLD
+## order; a self-referential check could never catch that, only an
+## independent, hardcoded expectation can.
 HI_TEST_ROWS = 864  # 867 rows in the file minus 3 empty ones (docs/phase1)
 # The expected exact sentence count for the Hindi test split after empty
 # sentences are dropped by load_split — a regression check against a known,
 # previously-verified number.
+## WHY a hardcoded literal (864) instead of recomputing "867 minus however
+## many are empty" dynamically: for the same reason as EXPECTED_LABELS above
+## — if this gate recomputed the expected count from the same loader logic
+## it's trying to test, a bug in that logic (e.g. filtering too
+## aggressively, or not at all) would silently satisfy its own check. A
+## fixed number, recorded once when the pipeline was known-good (per
+## docs/phase1), is the only way this assertion can actually fail when the
+## upstream dataset or the loader's filtering changes.
 
 
 def check(cond: bool, msg: str) -> None:
@@ -82,6 +109,17 @@ def check(cond: bool, msg: str) -> None:
         raise SystemExit(f"Gate failed: {msg}")
         # Immediately terminate the script with a non-zero exit status and
         # an explanatory message, since later checks likely depend on this one.
+        ## WHY stop at the FIRST failure instead of collecting every failing
+        ## check and reporting them all at the end: many later checks assume
+        ## earlier ones held — e.g. section 3's evaluator checks assume
+        ## section 1's label-map checks passed, and section 5's loop assumes
+        ## check_rows's alignment check means token/tag zipping is safe. If
+        ## LABELS were wrong but this script kept going anyway, the
+        ## downstream evaluator/logger checks could fail too (or, worse,
+        ## spuriously pass) for reasons that are really just a symptom of
+        ## the first break, producing a confusing wall of unrelated-looking
+        ## failures instead of one clear root cause. The trade-off: a run
+        ## with two independent bugs only ever reports the first one.
 
 
 def check_rows(lang: str, split: str, rows) -> None:
@@ -181,6 +219,17 @@ def main() -> None:
     # A predictor that exactly reproduces gold labels should score a perfect
     # 1.0 on every metric — verifies evaluate() isn't miscounting or
     # penalizing correct predictions.
+    ## WHY these two specific cases (all-O, and gold-vs-itself) rather than
+    ## some other hand-crafted example: they're the only two inputs whose
+    ## CORRECT F1 score is knowable with zero extra computation — exactly
+    ## 0.0 and exactly 1.0 respectively, for every entity type AND overall.
+    ## Any other test case (e.g. "predict PER where gold says ORG") would
+    ## require independently computing the expected precision/recall/F1 by
+    ## hand to know what evaluate() SHOULD return, which is itself
+    ## error-prone and just re-implements seqeval's logic in the test. These
+    ## two boundary cases instead pin down evaluate()'s two extremes for
+    ## free, which is enough to catch e.g. a sign flip, a wrong averaging
+    ## mode, or a broken length-mismatch guard, without needing an oracle.
 
     print("\n4. Results logger (temp file, real results.csv untouched)")
     # Section header: checks log_result's CSV-writing behavior in isolation,
@@ -210,6 +259,16 @@ def main() -> None:
         # Total rows should be 3: one header row + two data rows (one per
         # log_result call) — confirms the header-writing logic correctly
         # fires only when the file is new/empty, not on every call.
+        ## WHY call log_result TWICE here specifically: a single call could
+        ## never distinguish "the header-writing logic is correct" from "the
+        ## header-writing logic always writes a header" — both would produce
+        ## the same 2-row result (header + 1 data row) after one call. The
+        ## second call is what actually exercises results.py's
+        ## `write_header = not os.path.exists(path) or os.path.getsize(path)
+        ## == 0` branch on an ALREADY-non-empty file; if that check were ever
+        ## broken (e.g. someone changed it to always write the header), this
+        ## would produce 4 rows instead of 3 and this specific assertion
+        ## would catch it, whereas a single-call test would not.
 
     print("\n5. All splits for hi / mr / bn")
     # Section header: broader smoke test confirming every split loads
@@ -223,6 +282,15 @@ def main() -> None:
                 continue  # already checked above
                 # Skip re-checking Hindi's test split since section 2 above
                 # already loaded and validated it in detail.
+                ## WHY skip instead of just re-running check_rows again
+                ## (harmless-looking, since checks are idempotent): load_split
+                ## re-downloads/re-extracts and re-parses the full JSON-Lines
+                ## file from disk every time it's called — for hi/train
+                ## that's ~1M lines. Re-loading hi/test here specifically
+                ## would be pure wasted I/O for a result already known, since
+                ## section 2 already proved it loads correctly; this check
+                ## isn't about correctness, it's about not doubling this
+                ## gate script's runtime for zero additional information.
             check_rows(lang, split, load_split(lang, split))
             # Load this (lang, split) combination fresh and run the generic
             # row-integrity checks on it.

@@ -184,6 +184,22 @@ def main() -> None:
     # Sanity-check that a substantial number of tests actually ran (guards
     # against an import/discovery bug silently finding zero tests and
     # falsely appearing to "pass" by doing nothing).
+    ## WHY run the parser's unit tests FIRST, before any of the (much more
+    ## expensive) sections 2-5 below: every later section's trust in
+    ## phase5_parser.parse_llm_output — re-parsing 2 x 864 raw model
+    ## outputs in section 5 and expecting exact agreement with saved
+    ## predictions — is worthless if the parser itself has a known-broken
+    ## edge case. Failing fast here means a parser regression is reported as
+    ## "parser tests failed," the actual root cause, instead of surfacing
+    ## later as a confusing wall of "re-parse doesn't match saved
+    ## predictions" failures in section 5 that all trace back to the same
+    ## root problem. WHY the `>= 20` count specifically (not just checking
+    ## `tests` is non-empty): `t()` for every t in an EMPTY list silently
+    ## does nothing and never raises — if `tp`'s module-level test discovery
+    ## ever broke (e.g. a renamed test_ prefix convention), this whole
+    ## section could report nothing to check and still reach PASSED with
+    ## zero actual verification having occurred; requiring a specific
+    ## minimum count catches that "ran nothing, call it success" failure mode.
 
     print("\n2. Results sheet")
     # Section header: structural checks on results.csv and locating the two
@@ -266,6 +282,17 @@ def main() -> None:
         # exactly match the separately-recorded "model" and "revision"
         # fields in the notes — these are two independent places the same
         # information is recorded, and they must agree.
+        ## WHY check BOTH checkpoint_path's format (the CHECKPOINT_URL match
+        ## just above) AND this exact cross-match, instead of treating a
+        ## format-valid checkpoint_path as sufficient on its own: notes and
+        ## checkpoint_path are two SEPARATE fields that could individually
+        ## each look perfectly valid while disagreeing with each other —
+        ## e.g. someone updates `model`/`revision` in notes after swapping
+        ## to compare a different model variant, but forgets to also update
+        ## checkpoint_path (or vice versa). Each field in isolation would
+        ## pass its own validity check; only comparing them against each
+        ## other catches that the row is internally inconsistent about which
+        ## model was actually used.
         check(n["malformed"].isdigit() and abs(int(n["malformed"]) / FULL_TEST - float(n["malformed_rate"])) < 1e-4,
               f"{mode}: malformed output counted ({n['malformed']} of {FULL_TEST}, rate {n['malformed_rate']})")
         # Confirm the "malformed" count is a plain non-negative integer
@@ -345,6 +372,15 @@ def main() -> None:
     # LLM) and explicitly printed confirmation that it reproduced the
     # original Phase 3 handoff score — guarding against comparing the LLM
     # against a stale or different MuRIL number.
+    ## WHAT BREAKS without re-verifying this specific number here: the
+    ## Phase 5 doc wants to say "the LLM scores X vs. MuRIL's Y" as a fair
+    ## head-to-head. If this notebook instead just hardcoded/quoted MuRIL's
+    ## Phase 3 F1 from memory rather than re-running it fresh on these exact
+    ## 864 sentences, a subtle mismatch (a different test split revision, a
+    ## wrong checkpoint, a transcription typo of 0.8274) could silently make
+    ## the "MuRIL" side of the comparison wrong, while every other check in
+    ## this file is only validating the LLM side — this check is what
+    ## specifically guards the OTHER half of the comparison's integrity.
 
     print("\n5. Saved predictions reproduce the logged F1")
     # Section header: the deepest level of verification in this gate —
@@ -387,10 +423,36 @@ def main() -> None:
     # run was logged — proving the parser code hasn't been modified since
     # (if it had, re-running the checks below with today's parser wouldn't
     # actually prove anything about the originally-logged run).
+    ## WHY this hash check is a PREREQUISITE for section 5's whole strategy
+    ## to mean anything: the next checks re-run
+    ## `parse_llm_output(x["raw"], x["words"])` using whatever
+    ## phase5_parser.py is on disk RIGHT NOW and compare it to the SAVED
+    ## "pred" field. If the parser had since been edited (e.g. a bug fix to
+    ## R5's alignment logic), re-parsing could either now agree with the old
+    ## saved predictions by coincidence, or disagree even though the
+    ## ORIGINAL run was perfectly correct for the parser version it used at
+    ## the time — either way, that comparison would no longer be testing
+    ## "does this row reproduce," it would just be testing "does today's
+    ## parser happen to agree with yesterday's output." Pinning the hash
+    ## first establishes that today's parser IS byte-for-byte the one that
+    ## produced these predictions, which is what makes exact-match
+    ## reproduction meaningful evidence rather than a coincidence.
     test_rows = load_split(LANG, "test")           # the real gold test split, from the shared loader
     # Load the actual Hindi gold test split fresh from the shared data
     # loader, to compare against what was saved in the predictions file
     # (guards against the saved file having stale or tampered words/gold tags).
+    ## WHY re-load the dataset fresh here instead of just trusting the
+    ## "gold" field already saved inside PREDICTIONS (final_predictions.jsonl
+    ## is, after all, internally self-consistent — its own words/gold/pred
+    ## lengths already get checked above): a saved predictions file is a
+    ## snapshot frozen at whatever moment it was written. If the Hub dataset
+    ## were ever updated, or if final_predictions.jsonl were generated
+    ## against an older cached copy of the data than what load_split
+    ## fetches today, the file's own "gold" tags could be self-consistent
+    ## (same length as words/pred) while still being WRONG relative to the
+    ## actual current gold standard. Only re-loading independently and
+    ## comparing word-for-word, tag-for-tag (the check right below) can
+    ## catch that the snapshot itself has drifted from ground truth.
     for mode, r in by_mode.items():
         # Verify both modes' saved predictions in turn.
         system = next((s for s in recs if s.startswith(f"LLM {mode} [")), None)
@@ -489,6 +551,18 @@ def main() -> None:
     # Enforce the roadmap's "one page of concrete error examples"
     # requirement by capping the doc at 120 lines — a rough proxy for "about
     # one page" of markdown text.
+    ## WHY both of these checks are deliberately crude PROXY metrics rather
+    ## than something more "precise": a script can't judge whether prose
+    ## actually contains insightful, concrete error analysis — that's an
+    ## inherently qualitative, human judgment. Counting Devanagari-script
+    ## runs is a cheap, fully automatable stand-in for "this doc quotes real
+    ## Hindi example spans, not just English abstractions about error
+    ## types," and a line-count cap is an automatable stand-in for "about
+    ## one page." Neither can distinguish genuinely insightful content from
+    ## padding that happens to satisfy the proxy (e.g. 30 unrelated
+    ## Devanagari words pasted in) — the trade-off this gate accepts in
+    ## exchange for being able to check this requirement at all without a
+    ## human in the loop.
     stale = [s for s in RETIRED_SCORES if s in doc or s in err_doc]
     # Check whether either retired, pre-full-run F1 score still appears in
     # either doc.

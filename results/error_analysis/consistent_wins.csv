@@ -1,9 +1,0 @@
-lang,type,gold_entities,zero_shot_wins,in_language_wins
-mr,PER,704,17,1
-mr,ORG,401,17,7
-mr,LOC,571,16,4
-mr,ALL,1676,50,12
-bn,PER,459,1,8
-bn,ORG,207,1,3
-bn,LOC,331,5,7
-bn,ALL,997,7,18

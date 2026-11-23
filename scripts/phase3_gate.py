@@ -106,11 +106,31 @@ CHECKPOINT_URL = re.compile(r"https://huggingface\.co/[^/\s]+/[^/\s]+/tree/[0-9a
 # Regex matching a Hugging Face Hub URL pinned to an exact 40-character
 # commit SHA (e.g. ".../tree/<40 hex chars>") — ensures checkpoints are
 # referenced immutably rather than by a mutable branch name like "main".
+## WHY require a 40-hex-char SHA specifically, not just "any HF tree URL"
+## (e.g. accepting ".../tree/main"): a branch name like "main" is a MOVING
+## pointer — if the checkpoint repo is ever re-uploaded (even to fix an
+## unrelated file), ".../tree/main" would then resolve to different weights
+## than whatever was actually evaluated to produce the logged F1 score. A
+## commit SHA is immutable by construction (it's a hash of the content), so
+## pinning to one guarantees that reloading checkpoint_path months later
+## reproduces the EXACT weights the logged score came from — this is what
+## makes section 4's "handoff verified" re-scoring check (further down)
+## meaningful at all.
 RETIRED_SCORES = ("0.8330", "0.8343", "0.0807")  # pre-restart runs, must not be reported
 # Specific F1 values from an earlier, since-discarded set of runs (e.g.
 # before some bug was fixed and training was restarted) that must never
 # reappear in the current docs, as a regression check against accidentally
 # re-reporting stale numbers.
+## WHY hardcode these exact OLD numbers to forbid, instead of trusting that
+## the current handoff_f1/baseline_f1 comparison (sections 3-4) is enough:
+## those checks only validate whatever number IS currently logged in
+## results.csv and the notebook — they can't detect that a DIFFERENT, STALE
+## number from before a bug fix is still sitting in prose docs (README,
+## roadmap) that nothing else re-derives or cross-checks automatically. A
+## doc is just free text; copy-pasting an old F1 into it, or forgetting to
+## update it after a re-run, would otherwise go completely undetected by
+## every other check in this file, which all operate on the CURRENT
+## results.csv/notebook, not on what the docs happen to still say.
 
 
 def check(cond: bool, msg: str) -> None:
@@ -166,6 +186,17 @@ def notebook_stdout(nb: dict) -> list[str]:
     # Return every stdout line from the whole notebook, in the order it was printed.
 
 
+## WHY RE-IMPLEMENT the size-selection rule here instead of simply trusting
+## whatever size the notebook printed as "working subset size: N": that's
+## the central design idea of this whole gate — nothing about Phase 3's
+## conclusions is taken on faith from the notebook's own self-report. This
+## function independently recomputes, from the raw logged val_F1 numbers in
+## results.csv, what the documented rule (docs/01-roadmap.md) says the
+## answer SHOULD be, and main() then diffs that against what the notebook
+## actually printed (see the `stated == [chosen]` check below). WHAT THIS
+## CATCHES that trusting the printout alone would not: a bug in the
+## notebook's own selection code, a hand-edited "working subset size" print
+## statement, or a size chosen for convenience rather than by the rule.
 def choose_subset_size(curve_rows: list[dict[str, str]]) -> int:
     """Smallest size with no collapsed seed whose mean val F1 is within tolerance of the best."""
     # Docstring: documents the exact selection rule being re-implemented
@@ -198,6 +229,17 @@ def choose_subset_size(curve_rows: list[dict[str, str]]) -> int:
             # diverged/failed run skewing the mean upward by luck elsewhere),
             # and (b) its mean F1 is within SIZE_TOLERANCE of the best mean
             # observed at any size (i.e. "good enough" compared to the best).
+            ## WHY check `min(val_by_size[n])` (the WORST seed) for collapse
+            ## rather than checking the already-computed `means[n]` again:
+            ## a training run that diverges (collapses to near-zero F1) on
+            ## one unlucky seed, while the other two seeds train fine, can
+            ## still produce a deceptively reasonable MEAN once averaged —
+            ## e.g. two seeds at ~0.75 and one collapsed seed at ~0.02 could
+            ## still clear `means[n] >= best - SIZE_TOLERANCE` on a small
+            ## enough tolerance. Checking the single worst seed's score
+            ## against COLLAPSE_F1 specifically catches "this size is
+            ## unreliable across seeds," a failure mode the mean alone can
+            ## average away and hide.
             return n
             # Return immediately — since sizes are iterated ascending, this
             # is the smallest size satisfying the rule, favoring efficiency.
@@ -283,6 +325,14 @@ def main() -> None:
     # Require every single Phase 3 row to have been produced from exactly
     # the same git commit — guards against mixing results from different,
     # possibly inconsistent versions of the training code.
+    ## WHY this matters specifically for a SCALING CURVE / model comparison:
+    ## the whole point of comparing F1 across subset sizes (or MuRIL vs.
+    ## IndicBERT) is to isolate the effect of ONE variable at a time. If even
+    ## one row came from a commit with, say, a since-fixed tokenization bug,
+    ## any F1 difference involving that row could be explained by the code
+    ## change rather than by subset_size or model choice — making the whole
+    ## curve/comparison scientifically invalid even if every individual row's
+    ## own F1 number is perfectly correct in isolation.
 
     print("\n3. One clean notebook execution")
     # Section header: verifies the notebook was run top-to-bottom, once,
@@ -300,6 +350,16 @@ def main() -> None:
     # kernel, the execution counts must be exactly 1, 2, 3, ... in cell
     # order with no gaps, repeats, or out-of-order numbers — any deviation
     # means cells were re-run, skipped, or reordered.
+    ## WHY this specific invariant proves "clean, single, top-to-bottom run":
+    ## Jupyter's execution_count is a GLOBAL per-kernel counter that only
+    ## increments, never resets, across however many times cells get run. If
+    ## cell #3 (by position) were manually re-run once, mid-session, to patch
+    ## a bug, its execution_count would jump to whatever the counter had
+    ## reached by then (e.g. 7), breaking the strict 1,2,3,... sequence even
+    ## though the notebook LOOKS like it ran top-to-bottom. This check is
+    ## what rules out "I fixed one cell and re-ran just that one" — a
+    ## scenario where later cells' outputs could be stale relative to the
+    ## fixed code, silently mixing old and new results in the saved file.
     stdout = notebook_stdout(nb)
     # Extract every printed stdout line from the notebook, in execution order.
     printed = [tuple(row) for row in csv.reader(l for l in stdout if l.startswith(tuple(m + "," for m in PHASE_MODELS)))]
@@ -319,6 +379,19 @@ def main() -> None:
     # the notebook (and vice versa, with correct counts), regardless of
     # ordering differences, catching any row added, removed, or duplicated
     # by hand.
+    ## WHY Counter equality specifically, instead of `sorted(printed) ==
+    ## sorted(logged)` or plain list `==`: plain `==` would require printed
+    ## and logged rows to appear in IDENTICAL order, but there's no
+    ## guarantee the notebook prints MuRIL/IndicBERT rows in the same
+    ## relative order results.csv happens to store them in (results.csv is
+    ## an append-only file shared across phases). `sorted(...) == sorted(...)`
+    ## fixes the ordering problem but DE-DUPLICATES nothing — it would treat
+    ## a row appearing twice in `logged` but once in `printed` as equal to
+    ## the reverse case, since both sorted lists would just contain that row
+    ## at least once each. Counter equality specifically checks that each
+    ## distinct row appears the exact same NUMBER OF TIMES on both sides,
+    ## catching a hand-duplicated or hand-removed row that either of the
+    ## weaker comparisons would miss.
 
     print("\n4. MuRIL scaling curve and size choice")
     # Section header: verifies the scaling-curve experiment and the
@@ -383,6 +456,17 @@ def main() -> None:
     # checkpoint_path — proving the logged checkpoint link is the one that
     # was actually reloaded and verified to reproduce the score, not just
     # asserted.
+    ## WHY this check is needed IN ADDITION to section 2's CHECKPOINT_URL
+    ## regex match: that earlier check only proves checkpoint_path is
+    ## SHAPED like a valid pinned URL (right format, 40-hex SHA) — it says
+    ## nothing about whether that URL actually points at the checkpoint that
+    ## produced handoff_f1. This check instead cross-references a SEPARATE
+    ## notebook stdout line ("handoff verified: repo@sha ...") that can only
+    ## have been printed if the notebook code actually re-downloaded that
+    ## exact revision and re-ran evaluation on it. Matching the repo+SHA
+    ## reconstructed from that line against checkpoint_path closes the gap
+    ## between "looks like a valid pin" (format-only) and "was independently
+    ## reloaded and confirmed to reproduce the score" (actually verified).
 
     print("\n5. IndicBERT comparison")
     # Section header: verifies IndicBERT was also evaluated, specifically at

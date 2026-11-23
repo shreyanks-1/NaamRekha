@@ -159,6 +159,22 @@ def main() -> None:
     # hyphen-minus (-), so negative numbers formatted either way still
     # match the ASCII-minus strings this script builds (e.g. via Python's
     # `{:+.4f}` formatting, which always uses ASCII "-").
+    ## WHY stripping `*`/backticks matters even though a bare number like
+    ## "0.8274" would substring-match inside "**0.8274**" regardless: many
+    ## checks below (`says`) search for COMPOSITE strings spanning several
+    ## numbers at once — e.g. "{mean} ± {sd}" or a whole markdown table row
+    ## "label | 0.80 | 0.70 | ... |". If the report individually bolds or
+    ## code-formats just ONE number inside such a phrase (e.g. "**0.8274**
+    ## ± 0.0012"), the markup characters sitting BETWEEN the two numbers
+    ## break the contiguous substring this script is searching for, even
+    ## though a human reading the rendered markdown sees the exact same
+    ## text. Stripping markup first makes composite, multi-number phrases
+    ## matchable regardless of which individual numbers the report author
+    ## chose to emphasize. The Unicode-minus replacement exists for the same
+    ## reason on negative numbers: Python's `{:+.4f}` always emits ASCII
+    ## "-", but a markdown export/editor pipeline can silently "smart-quote"
+    ## it into "−" (U+2212) in the saved file, which looks identical to a
+    ## reader but would otherwise never byte-match this script's ASCII-built strings.
 
     def says(s: str, what: str) -> None:
         # A local helper specific to this gate: checks that a given exact
@@ -184,6 +200,16 @@ def main() -> None:
     # excluding links that start with "http:" or "https:" (external links,
     # not checked for local existence), and `([^)#\s]+)` captures the path
     # itself, stopping at a closing paren, a "#" fragment identifier, or whitespace.
+    ## WHY exclude external (http/https) links from existence-checking
+    ## rather than verifying those resolve too: checking a live URL would
+    ## require network access during what's otherwise a fully offline,
+    ## instant gate script — making it flaky (dependent on an external
+    ## site's uptime or this machine's network access) and slow, for
+    ## something that isn't really about THIS project's own traceability
+    ## anyway. A broken relative link (e.g. "../results/foo.png") is this
+    ## repo's own bug to catch; a dead external URL is the external site's
+    ## problem, not something this gate can meaningfully guarantee or
+    ## should block a "PASSED" on.
     missing = [l for l in links if not os.path.exists(os.path.normpath(os.path.join(os.path.dirname(REPORT), l)))]
     # For each extracted relative link path, resolve it relative to the
     # report's OWN directory (docs/phase6/) using os.path.join, normalize
@@ -214,6 +240,17 @@ def main() -> None:
     # Record a (trivially always-true) PASS line documenting that this
     # check was performed — reaching this line means the previous line
     # didn't raise, so the figure script's data loading genuinely succeeded.
+    ## WHY a `check(True, ...)` call that can never fail, instead of no
+    ## check() call at all here: the ACTUAL verification already happened —
+    ## pf.load_scores()/load_errors() raise SystemExit internally (via their
+    ## own pick()/validation logic) if anything about the figure script's
+    ## data sources is missing or ambiguous, so simply reaching this line
+    ## without an exception IS the proof. But every other verification in
+    ## this gate produces a "PASS <description>" line in the printed output
+    ## for a human skimming the gate's results — without this line, a
+    ## genuinely-performed check (did the figure script's data load
+    ## cleanly?) would be invisible in that output, looking like it was
+    ## never checked at all even though it was.
 
     rows = read_csv(RESULTS_PATH)
     # Load every row of the shared results.csv, to be filtered/queried
@@ -287,6 +324,19 @@ def main() -> None:
         # display key via a literal lookup dict — will raise a KeyError
         # (crashing the script) if an unexpected language pair ever
         # appears, which is an intentional implicit sanity check.
+        ## WHY a literal dict listing only the 5 expected pairs, instead of
+        ## something permissive like f"{train}-{test}" that would accept
+        ## ANY pair: this gate's section 3 assumes EXACTLY 5 named cells
+        ## (hi-hi, hi-mr, hi-bn, mr-mr, bn-bn) and checks `len(groups) == 5`
+        ## against that assumption. If Phase 4's data ever grew an
+        ## unexpected pair — a typo'd language code, or a new language added
+        ## without updating this script — an f-string-built key would
+        ## silently create a 6th group that this gate's "exactly 5 cells"
+        ## check would then correctly flag, but only AFTER the data had
+        ## already been silently mis-grouped. A literal dict instead fails
+        ## IMMEDIATELY and precisely at the exact unexpected row, forcing
+        ## this script to be explicitly updated whenever the transfer
+        ## matrix's shape genuinely changes.
         groups[key][n["seed"]] = r
         # Store this row under its (cell key, seed) coordinate.
     check(all(sorted(g) == ["42", "43", "44"] for g in groups.values()) and len(groups) == 5, "five matrix cells, three seeds each")

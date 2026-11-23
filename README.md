@@ -6,18 +6,13 @@ Named Entity Recognition for Indian languages. Tag person (PER), location (LOC),
 
 Dataset: [ai4bharat/naamapadam](https://huggingface.co/datasets/ai4bharat/naamapadam).
 
-## Start here
-
-Read [docs/README.md](docs/README.md) first. It is the single source of truth for how the team works, and it links to the plan, roles, conventions, compute strategy, pitfalls, and decisions log.
-
 ## Repository layout
 
 ```
 NaamRekha/
-  docs/          # team guidelines (start with docs/README.md)
   src/           # shared data loader + seqeval harness (Lead owns)
   notebooks/     # one notebook per person per stage
-  results/       # results.csv (the experiment log) + metrics
+  scripts/       # per-phase gate checks and helpers
   checkpoints/   # configs / pointers only; model weights live on Drive/Kaggle
   data/          # datasets (downloaded, git-ignored; data/samples/ is tracked)
 ```
@@ -25,7 +20,7 @@ NaamRekha/
 ## The three team laws
 
 1. One tag scheme, one evaluator: IOB2 (PER/ORG/LOC) and `seqeval` entity-level F1, everywhere.
-2. Every experiment logs one row in `results/results.csv`.
+2. Every experiment logs one row in the experiment log.
 3. Skip nothing; when compute is tight, shrink the data subset, never drop a stage.
 
 ## Setup
@@ -39,4 +34,4 @@ uv run jupyter lab      # or: uv run python ...
 
 Add the dev tools (notebooks, linting) with `uv sync --group dev`. Commit `uv.lock` so everyone resolves the same versions. If someone needs a pip-style file, export one with `uv export --format requirements-txt > requirements.txt`.
 
-Real training runs on free Colab / Kaggle GPUs, which provide their own Python and CUDA stack. See [docs/04-compute.md](docs/04-compute.md).
+Real training runs on free Colab / Kaggle GPUs, which provide their own Python and CUDA stack.

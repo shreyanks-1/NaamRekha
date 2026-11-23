@@ -5,6 +5,17 @@
 
 # Blank line separating the module docstring from the imports below (PEP 8 style).
 
+## WHY re-export everything through src/__init__.py instead of having every
+## notebook write `from src.data import load_split, LABELS` and
+## `from src.eval import evaluate` and `from src.results import log_result`
+## separately: every phase notebook can instead write one line,
+## `from src import load_split, evaluate, log_result, LABELS`, without
+## knowing or caring which of the three sibling files each name actually
+## lives in. WHAT BREAKS/gets harder without this layer: if a name were ever
+## moved between data.py/eval.py/results.py during refactoring (e.g. tag
+## distribution logic moved into eval.py), every notebook importing from the
+## specific submodule would need updating; importing from the package
+## instead means only this one file needs the import path changed.
 from .data import (
     # Relative import from the sibling module `data.py` inside this package;
     # pulls in everything the rest of the pipeline needs to load the
@@ -37,6 +48,14 @@ __all__ = [
     # __all__ explicitly declares this package's public API: these are the
     # only names that `from src import *` will expose, and it documents at a
     # glance everything this shared module offers to notebooks/scripts.
+    ## WHY declare __all__ at all, since every name above is already imported
+    ## into this module's namespace (and thus technically reachable): without
+    ## __all__, `from src import *` would also export anything incidentally
+    ## imported here as an implementation detail (were one added later), and
+    ## linters/IDEs can't tell "public API" from "thing this file happens to
+    ## use internally." __all__ makes the ten names above an explicit,
+    ## version-controlled contract of what the rest of the project may rely
+    ## on, separate from what src/__init__.py merely imports for its own use.
     "COLUMNS",
     # Re-exported: the list of column names for the results CSV.
     "LABELS",
