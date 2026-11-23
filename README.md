@@ -1,5 +1,7 @@
 # NaamRekha
 
+> Based on [iPriyadarshi/NaamRekha](https://github.com/iPriyadarshi/NaamRekha), with detailed line-by-line explanatory comments added throughout the code.
+
 Named Entity Recognition for Indian languages. Tag person (PER), location (LOC), and organisation (ORG) spans in Hindi and a second Indian language (Marathi / Bengali), with a focus on cross-lingual zero-shot transfer between related Indian languages.
 
 Dataset: [ai4bharat/naamapadam](https://huggingface.co/datasets/ai4bharat/naamapadam).
